@@ -24,10 +24,15 @@ const MAX_MEMO: usize = 64 * 1024;
 
 /// 转换 `f` 期间，把 `data` 当作当前 .dbf 的备注文件（`fox` 为真是 FoxPro 的 .fpt，否则是 .dbt）。
 pub(crate) fn with_memo<T>(data: Vec<u8>, fox: bool, f: impl FnOnce() -> T) -> T {
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            MEMO.with(|m| *m.borrow_mut() = None);
+        }
+    }
     MEMO.with(|m| *m.borrow_mut() = Some(Memo { fox, data }));
-    let out = f();
-    MEMO.with(|m| *m.borrow_mut() = None);
-    out
+    let _clear = Clear;
+    f()
 }
 
 impl Memo {
@@ -355,5 +360,18 @@ pub(crate) mod tests {
         // 坏的配套文件不报错
         let d = with_memo(vec![1, 2, 3], true, || convert(&bytes, &Options::default())).unwrap();
         assert_eq!(d.parts, 1);
+    }
+
+    #[test]
+    fn with_memo_clears_tls_even_after_panic() {
+        let bytes = memo_sample();
+        let res = std::panic::catch_unwind(|| {
+            let mut dbt = vec![0u8; 512];
+            dbt.extend_from_slice(b"leaked?\x1A\x1A");
+            with_memo(dbt, false, || panic!("boom"));
+        });
+        assert!(res.is_err());
+        let d = convert(&bytes, &Options::default()).unwrap();
+        assert!(!d.markdown.contains("leaked?"), "{}", d.markdown);
     }
 }

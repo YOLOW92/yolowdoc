@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 - 2026-11-14
+
+- Verify ISO-3309 CRC-32 checksums on ZIP entry reads and normalize leading-slash/case lookup keys consistently in `Zip::open`.
+- Reduce XLSX worksheet parsing allocations and memory overhead (`CellVal` compact indexing into contiguous shared/inline string storage, zero-alloc `General` numeric fast path, buffer reuse in `xml::Reader::text_until_end_into`, and streamed `md::Grid` rendering).
+- Add UTF-8 and UTF-16 LE/BE BOM decoding for plain text, Markdown, subtitles, notebooks, source code, and CSV/TSV inputs.
+- Tighten bounds and state cleanup on untrusted inputs: cap repeating OLE DIFAT chain expansion, bound TNEF/LZFU preallocation, enforce `Limits` inside 7z `EncodedHeader`, check `Limits::max_columns` / `checked_add` in SQLite records, check `Options::deadline` in `media_bytes`, and clear DBF memo TLS via a `Drop` guard on panic.
+- Add `.gitattributes` to enforce LF line endings across platforms and expand `examples/bench.rs`, integration tests, and ignored fuzz targets.
+
 ## 0.1.0 - 2026-11-13
 
 - Initial standalone MIT-licensed release extracted from PageSift (`pagesift-office`).

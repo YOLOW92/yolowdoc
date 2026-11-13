@@ -62,6 +62,8 @@ impl<'a> Ole<'a> {
         let difat_start = u32_at(data, 68).ok_or_else(|| bad("short header"))?;
         let max_sectors = data.len() / sector + 1;
 
+        let max_fat = max_sectors.div_ceil(sector / 4);
+
         // FAT 扇区号：头里 109 个，其余在 DIFAT 链上
         let mut fat_sectors: Vec<u32> = (0..109)
             .filter_map(|i| u32_at(data, 76 + i * 4))
@@ -69,7 +71,7 @@ impl<'a> Ole<'a> {
             .collect();
         let mut next = difat_start;
         let mut hops = 0;
-        while next < END_OF_CHAIN && hops < max_sectors {
+        while next < END_OF_CHAIN && hops < max_sectors && fat_sectors.len() < max_fat {
             hops += 1;
             let Some(body) = sector_slice(data, sector, next) else {
                 break;
@@ -82,7 +84,11 @@ impl<'a> Ole<'a> {
             );
             next = u32_at(body, per * 4).unwrap_or(END_OF_CHAIN);
         }
-        fat_sectors.truncate(num_fat.max(fat_sectors.len().min(max_sectors)));
+        fat_sectors.truncate(if num_fat > 0 {
+            num_fat.min(max_fat)
+        } else {
+            max_fat
+        });
         let mut fat = Vec::new();
         for s in fat_sectors {
             if let Some(body) = sector_slice(data, sector, s) {
@@ -400,5 +406,21 @@ pub(crate) mod tests {
         let mut bad = build(&[]);
         bad[30] = 3;
         assert!(Ole::open(&bad).is_err());
+    }
+
+    #[test]
+    fn repeating_difat_does_not_inflate_fat_allocations() {
+        let mut bytes = build(&[Node {
+            name: "a",
+            data: b"x",
+            storage: false,
+            parent: 0,
+        }]);
+        bytes.resize(4096, 0);
+        // 声称 u32::MAX 个 FAT 扇区 + 自循环 DIFAT 链
+        bytes[44..48].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[68..72].copy_from_slice(&0u32.to_le_bytes());
+        let (_, peak) = crate::test_probe::peak(|| Ole::open(&bytes));
+        assert!(peak < 64 << 10, "DIFAT peak allocation {peak} bytes");
     }
 }

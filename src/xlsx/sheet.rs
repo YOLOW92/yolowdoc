@@ -2,11 +2,30 @@
 
 use super::Book;
 use super::pivot::{Area, format_at};
+use crate::md::Grid;
 use crate::xml::{Reader, Tok, local_name};
-use crate::{Error, Options};
+use crate::{Error, Options, budget};
 
 /// 表里连续这么多个空行以上就不再原样输出（稀疏的大表）。
 const MAX_EMPTY_RUN: u32 = 1000;
+
+#[derive(Clone, Copy)]
+enum CellVal {
+    Shared(u32),
+    Range(u32, u32),
+    Bool(bool),
+}
+
+impl CellVal {
+    fn as_str<'a>(self, shared: &'a [String], owned: &'a str) -> &'a str {
+        match self {
+            CellVal::Shared(i) => shared.get(i as usize).map_or("", String::as_str),
+            CellVal::Range(a, b) => &owned[a as usize..b as usize],
+            CellVal::Bool(true) => "TRUE",
+            CellVal::Bool(false) => "FALSE",
+        }
+    }
+}
 
 /// 读一个工作表，返回表格（第一行是表头）。`budget` 是剩下可输出的单元格数，用完就截断并警告。
 pub(super) fn read(
@@ -16,9 +35,12 @@ pub(super) fn read(
     opts: &Options<'_>,
     budget: &mut usize,
     warnings: &mut Vec<String>,
-) -> Result<Vec<Vec<String>>, Error> {
+) -> Result<Grid, Error> {
     let max_cols = opts.limits.max_columns as u32;
-    let mut cells: Vec<(u32, u32, String)> = Vec::new();
+    let mut cells: Vec<(u32, u32, CellVal)> = Vec::new();
+    let mut owned_text = String::new();
+    let mut v_buf = String::new();
+    let mut inline_buf = String::new();
     let mut row = 0u32;
     let mut col = 0u32;
     let mut dropped_cols = false;
@@ -27,6 +49,7 @@ pub(super) fn read(
     let mut hidden_cols: Vec<(u32, u32)> = Vec::new();
     let mut hidden_row = false;
     let mut hidden_rows: Vec<u32> = Vec::new();
+    let mut unbilled = 0usize;
     let mut r = Reader::new(xml);
     while let Some(t) = r.next()? {
         let Tok::Start(name, a) = t else { continue };
@@ -90,7 +113,7 @@ pub(super) fn read(
                 let (rr, cc) = pos.unwrap_or((row, col + 1));
                 row = rr;
                 col = cc;
-                let (v, inline) = cell_content(&mut r)?;
+                cell_content_into(&mut r, &mut v_buf, &mut inline_buf)?;
                 if hidden_row || hidden_cols.iter().any(|&(lo, hi)| (lo..=hi).contains(&cc)) {
                     continue;
                 }
@@ -98,38 +121,75 @@ pub(super) fn read(
                     dropped_cols = true;
                     continue;
                 }
-                let text = match kind {
-                    CellKind::Shared => v
-                        .trim()
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|i| book.shared.get(i))
-                        .cloned()
-                        .unwrap_or_default(),
-                    CellKind::InlineStr => inline,
-                    CellKind::Bool => {
-                        if v.trim() == "1" {
-                            "TRUE".into()
-                        } else {
-                            "FALSE".into()
+                let (val, text_len) = match kind {
+                    CellKind::Shared => {
+                        let Some(s_val) = v_buf
+                            .trim()
+                            .parse::<u32>()
+                            .ok()
+                            .and_then(|i| book.shared.get(i as usize).map(|s| (i, s)))
+                        else {
+                            continue;
+                        };
+                        if s_val.1.trim().is_empty() {
+                            continue;
                         }
+                        (CellVal::Shared(s_val.0), s_val.1.len())
                     }
-                    CellKind::Text => v,
-                    CellKind::Num if v.is_empty() => String::new(),
-                    CellKind::Num => book.number(&v, style, format_at(pivots, rr, cc)),
+                    CellKind::InlineStr => {
+                        if inline_buf.trim().is_empty() {
+                            continue;
+                        }
+                        let start = owned_text.len() as u32;
+                        owned_text.push_str(&inline_buf);
+                        let end = owned_text.len() as u32;
+                        (CellVal::Range(start, end), (end - start) as usize)
+                    }
+                    CellKind::Bool => {
+                        let b = v_buf.trim() == "1";
+                        (CellVal::Bool(b), if b { 4 } else { 5 })
+                    }
+                    CellKind::Text => {
+                        if v_buf.trim().is_empty() {
+                            continue;
+                        }
+                        let start = owned_text.len() as u32;
+                        owned_text.push_str(&v_buf);
+                        let end = owned_text.len() as u32;
+                        (CellVal::Range(start, end), (end - start) as usize)
+                    }
+                    CellKind::Num if v_buf.is_empty() => continue,
+                    CellKind::Num => {
+                        let start = owned_text.len();
+                        book.number_into(&v_buf, style, format_at(pivots, rr, cc), &mut owned_text);
+                        if owned_text[start..].trim().is_empty() {
+                            owned_text.truncate(start);
+                            continue;
+                        }
+                        let end = owned_text.len();
+                        (CellVal::Range(start as u32, end as u32), end - start)
+                    }
                 };
-                if text.trim().is_empty() {
-                    continue;
-                }
                 if cells.len() >= *budget {
                     truncated = true;
                     break;
                 }
-                cells.push((rr, cc, text));
+                unbilled += text_len;
+                cells.push((rr, cc, val));
+                if unbilled >= budget::BATCH {
+                    let ok = budget::spend(unbilled);
+                    unbilled = 0;
+                    if !ok {
+                        break;
+                    }
+                }
             }
             "mergeCells" | "conditionalFormatting" | "dataValidations" | "extLst" => r.skip()?,
             _ => {}
         }
+    }
+    if unbilled > 0 {
+        budget::spend(unbilled);
     }
     if dropped_cols {
         warnings.push(format!(
@@ -137,7 +197,7 @@ pub(super) fn read(
         ));
     }
     if cells.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Grid::default());
     }
     // 去掉隐藏的行列后，后面的往前挪，表里不留空行空列
     if !hidden_cols.is_empty() || !hidden_rows.is_empty() {
@@ -151,42 +211,68 @@ pub(super) fn read(
             c.0 -= hidden_rows.partition_point(|&r| r < c.0) as u32;
         }
     }
-    let r0 = cells.iter().map(|c| c.0).min().unwrap_or(1);
     let c0 = cells.iter().map(|c| c.1).min().unwrap_or(1);
     let c1 = cells.iter().map(|c| c.1).max().unwrap_or(1);
     let width = (c1 - c0 + 1) as usize;
     cells.sort_by_key(|c| (c.0, c.1));
 
-    let mut grid: Vec<Vec<String>> = Vec::new();
-    let mut last_row = r0;
+    let mut grid = Grid::default();
+    let mut last_row = 0u32;
     let mut skipped = 0u64;
     let mut cut = false;
-    for (rr, cc, text) in cells {
-        if grid.is_empty() || rr != last_row {
-            let gap = if grid.is_empty() {
-                0
-            } else {
-                rr - last_row - 1
-            };
+    let mut idx = 0usize;
+    while idx < cells.len() {
+        let rr = cells[idx].0;
+        let mut row_end = idx + 1;
+        while row_end < cells.len() && cells[row_end].0 == rr {
+            row_end += 1;
+        }
+        if grid.rows() > 0 {
+            let gap = rr - last_row - 1;
             if gap > MAX_EMPTY_RUN {
                 skipped += u64::from(gap);
             } else {
                 for _ in 0..gap {
-                    if !push_row(&mut grid, width, budget) {
+                    if *budget < width {
                         cut = true;
                         break;
                     }
+                    *budget -= width;
+                    for _ in 0..width {
+                        grid.push_cell("");
+                    }
+                    grid.end_row();
                 }
             }
-            if cut || !push_row(&mut grid, width, budget) {
-                cut = true;
-                break;
+        }
+        if cut || *budget < width {
+            cut = true;
+            break;
+        }
+        *budget -= width;
+        let mut cur_c = c0;
+        let mut j = idx;
+        while j < row_end {
+            let cc = cells[j].1;
+            // 同坐标覆盖：保留后出现的单元格
+            while j + 1 < row_end && cells[j + 1].1 == cc {
+                j += 1;
             }
-            last_row = rr;
+            while cur_c < cc {
+                grid.push_cell("");
+                cur_c += 1;
+            }
+            grid.push_cell(cells[j].2.as_str(&book.shared, &owned_text));
+            cur_c = cc + 1;
+            j += 1;
         }
-        if let Some(cell) = grid.last_mut().and_then(|g| g.get_mut((cc - c0) as usize)) {
-            *cell = text;
+        while cur_c <= c1 {
+            grid.push_cell("");
+            cur_c += 1;
         }
+        grid.end_row();
+        last_row = rr;
+        idx = row_end;
     }
     if skipped > 0 {
         warnings.push(format!(
@@ -206,25 +292,19 @@ fn flag(v: Option<&str>) -> bool {
     matches!(v, Some("1" | "true"))
 }
 
-fn push_row(grid: &mut Vec<Vec<String>>, width: usize, budget: &mut usize) -> bool {
-    if *budget < width {
-        return false;
-    }
-    *budget -= width;
-    grid.push(vec![String::new(); width]);
-    true
-}
-
-/// 单元格里的值 `v` 和行内字符串 `is`（刚读到 `c` 的开始标签）。公式 `f` 不要。
-fn cell_content(r: &mut Reader<'_>) -> Result<(String, String), Error> {
-    let mut v = String::new();
-    let mut inline = String::new();
+/// 单元格里的值 `v` 和行内字符串 `is`（刚读到 `c` 的开始标签），复用调用方缓冲区。公式 `f` 不要。
+fn cell_content_into(r: &mut Reader<'_>, v: &mut String, inline: &mut String) -> Result<(), Error> {
+    v.clear();
+    inline.clear();
     let mut depth = 1;
     while let Some(t) = r.next()? {
         match t {
             Tok::Start(n, _) => match local_name(n) {
-                "v" => v = r.text_until_end()?,
-                "t" => inline.push_str(&r.text_until_end()?),
+                "v" => {
+                    v.clear();
+                    r.text_until_end_into(v)?;
+                }
+                "t" => r.text_until_end_into(inline)?,
                 "f" | "rPh" | "extLst" => r.skip()?,
                 _ => depth += 1,
             },
@@ -237,7 +317,7 @@ fn cell_content(r: &mut Reader<'_>) -> Result<(String, String), Error> {
             Tok::Text(_) => {}
         }
     }
-    Ok((v, inline))
+    Ok(())
 }
 
 /// `AB12` → (行 12, 列 28)。

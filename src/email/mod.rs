@@ -4,6 +4,9 @@
 //! [`crate::Options::member`]；嵌套和文件总数与压缩包共用一份额度。
 
 mod header;
+#[cfg(test)]
+pub(crate) mod lzfu;
+#[cfg(not(test))]
 mod lzfu;
 mod mime;
 mod msg;

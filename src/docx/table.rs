@@ -169,5 +169,6 @@ fn flat(b: &Block) -> String {
             .map(|r| r.join(" "))
             .collect::<Vec<_>>()
             .join("\n"),
+        Block::Grid(grid) => grid.join_rows("\n"),
     }
 }

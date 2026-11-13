@@ -149,6 +149,7 @@ fn notes(xml: &str, ctx: &mut Ctx<'_>) -> Result<Vec<(String, String)>, Error> {
                     .map(|r| r.join(" "))
                     .collect::<Vec<_>>()
                     .join(" "),
+                Block::Grid(grid) => grid.join_rows(" "),
             })
             .collect();
         out.push((id, text.join(" ").replace("\\\n", " ")));

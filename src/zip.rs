@@ -21,6 +21,7 @@ struct Entry {
     name: String,
     method: u16,
     flags: u16,
+    crc: u32,
     compressed: u64,
     size: u64,
     offset: u64,
@@ -69,6 +70,7 @@ impl<'a> Zip<'a> {
             }
             let flags = u16_at(cd, at + 8).unwrap_or(0);
             let method = u16_at(cd, at + 10).unwrap_or(0);
+            let crc = u32_at(cd, at + 16).unwrap_or(0);
             let mut compressed = u64::from(u32_at(cd, at + 20).unwrap_or(0));
             let mut size = u64::from(u32_at(cd, at + 24).unwrap_or(0));
             let name_len = usize::from(u16_at(cd, at + 28).unwrap_or(0));
@@ -87,6 +89,7 @@ impl<'a> Zip<'a> {
                 name: String::from_utf8_lossy(name).into_owned(),
                 method,
                 flags,
+                crc,
                 compressed,
                 size,
                 offset,
@@ -95,7 +98,9 @@ impl<'a> Zip<'a> {
         }
         let mut by_name = HashMap::with_capacity(entries.len());
         for (i, e) in entries.iter().enumerate() {
-            by_name.entry(e.name.to_lowercase()).or_insert(i);
+            by_name
+                .entry(e.name.trim_start_matches('/').to_lowercase())
+                .or_insert(i);
         }
         Ok(Zip {
             data,
@@ -126,10 +131,6 @@ impl<'a> Zip<'a> {
 
     pub(crate) fn contains(&self, name: &str) -> bool {
         self.lookup_index(name).is_some()
-    }
-
-    pub(crate) fn entry_size(&self, name: &str) -> Option<u64> {
-        self.lookup_index(name).map(|i| self.entries[i].size)
     }
 
     /// 解压一个条目；没有这个条目时返回 `None`。名字不分大小写，开头的 `/` 可有可无。
@@ -189,6 +190,9 @@ impl<'a> Zip<'a> {
                 "{}: size does not match the directory",
                 e.name
             )));
+        }
+        if crc32(&out) != e.crc {
+            return Err(bad(&format!("{}: CRC-32 mismatch", e.name)));
         }
         self.budget.set(self.budget.get() - e.size);
         Ok(Some(out))
@@ -257,6 +261,57 @@ fn zip64_extra(mut extra: &[u8], size: &mut u64, compressed: &mut u64, offset: &
     }
 }
 
+const CRC_TABLES: [[u32; 256]; 8] = {
+    let mut t = [[0u32; 256]; 8];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut j = 0;
+        while j < 8 {
+            c = if c & 1 != 0 {
+                (c >> 1) ^ 0xEDB8_8320
+            } else {
+                c >> 1
+            };
+            j += 1;
+        }
+        t[0][i] = c;
+        i += 1;
+    }
+    let mut k = 1;
+    while k < 8 {
+        let mut i = 0;
+        while i < 256 {
+            let prev = t[k - 1][i];
+            t[k][i] = (prev >> 8) ^ t[0][(prev & 0xFF) as usize];
+            i += 1;
+        }
+        k += 1;
+    }
+    t
+};
+
+fn crc32(data: &[u8]) -> u32 {
+    let mut c = !0u32;
+    let (chunks, rest) = data.as_chunks::<8>();
+    for chunk in chunks {
+        c ^= u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let hi = u32::from_le_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+        c = CRC_TABLES[7][(c & 0xFF) as usize]
+            ^ CRC_TABLES[6][((c >> 8) & 0xFF) as usize]
+            ^ CRC_TABLES[5][((c >> 16) & 0xFF) as usize]
+            ^ CRC_TABLES[4][((c >> 24) & 0xFF) as usize]
+            ^ CRC_TABLES[3][(hi & 0xFF) as usize]
+            ^ CRC_TABLES[2][((hi >> 8) & 0xFF) as usize]
+            ^ CRC_TABLES[1][((hi >> 16) & 0xFF) as usize]
+            ^ CRC_TABLES[0][((hi >> 24) & 0xFF) as usize];
+    }
+    for &b in rest {
+        c = CRC_TABLES[0][((c ^ u32::from(b)) & 0xFF) as usize] ^ (c >> 8);
+    }
+    !c
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -266,6 +321,7 @@ pub(crate) mod tests {
         let mut out = Vec::new();
         let mut cd = Vec::new();
         for (name, data, deflate) in entries {
+            let crc = crc32(data);
             let body = if *deflate {
                 miniz_oxide::deflate::compress_to_vec(data, 6)
             } else {
@@ -277,7 +333,8 @@ pub(crate) mod tests {
                 &LOCAL_SIG.to_le_bytes()[..],
                 &[20, 0, 0, 0],
                 &method.to_le_bytes(),
-                &[0; 8],
+                &[0; 4],
+                &crc.to_le_bytes(),
             ] {
                 out.extend_from_slice(b);
             }
@@ -290,7 +347,8 @@ pub(crate) mod tests {
             cd.extend_from_slice(&CENTRAL_SIG.to_le_bytes());
             cd.extend_from_slice(&[20, 0, 20, 0, 0, 0]);
             cd.extend_from_slice(&method.to_le_bytes());
-            cd.extend_from_slice(&[0; 8]);
+            cd.extend_from_slice(&[0; 4]);
+            cd.extend_from_slice(&crc.to_le_bytes());
             cd.extend_from_slice(&(body.len() as u32).to_le_bytes());
             cd.extend_from_slice(&(data.len() as u32).to_le_bytes());
             cd.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -410,5 +468,43 @@ pub(crate) mod tests {
                 let _ = zip.read("a");
             }
         }
+    }
+
+    #[test]
+    fn crc32_leading_slash_unicode_and_duplicates() {
+        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
+        let z = build(&[
+            ("/sub/Lead.txt", b"first", false),
+            ("sub/lead.txt", b"second", false),
+            ("Übung/Über.txt", b"uni", true),
+            ("empty.txt", b"", false),
+        ]);
+        let zip = Zip::open(&z, &Limits::default()).unwrap();
+        assert_eq!(zip.read("sub/lead.txt").unwrap().unwrap(), b"first");
+        assert_eq!(zip.read("/SUB/LEAD.TXT").unwrap().unwrap(), b"first");
+        assert_eq!(zip.read("übung/über.txt").unwrap().unwrap(), b"uni");
+        assert_eq!(zip.read("ÜBUNG/ÜBER.TXT").unwrap().unwrap(), b"uni");
+        assert_eq!(zip.read("empty.txt").unwrap().unwrap(), b"");
+
+        let mut bad_stored = build(&[("a.txt", b"hello!", false)]);
+        let pos = bad_stored.windows(6).position(|w| w == b"hello!").unwrap();
+        bad_stored[pos] ^= 1;
+        let err = Zip::open(&bad_stored, &Limits::default())
+            .unwrap()
+            .read("a.txt")
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("CRC-32"), "{err:?}");
+
+        let mut bad_deflate = build(&[("b.txt", b"aaaaaaaaaaaaaaaa", true)]);
+        let cd = bad_deflate
+            .windows(4)
+            .rposition(|w| w == CENTRAL_SIG.to_le_bytes())
+            .unwrap();
+        bad_deflate[cd + 16] ^= 1;
+        let err = Zip::open(&bad_deflate, &Limits::default())
+            .unwrap()
+            .read("b.txt")
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("CRC-32"), "{err:?}");
     }
 }

@@ -79,6 +79,24 @@ fn main() -> Result<(), yolowdoc::Error> {
 
 ---
 
+## 性能参考
+
+Linux x86_64 单核绑核实测（`cargo run --release --example bench`，p50 越低越好，吞吐越高越好）：
+
+| 用例 | 输入大小 | p50 耗时 | 吞吐 |
+|---|---|---|---|
+| `docx_2500p`（DOCX 2,500 段落） | 41,454 B | 1.910 ms | 20.70 MiB/s |
+| `xlsx_4000x8`（XLSX 32,000 单元格） | 183,400 B | 15.212 ms | 11.50 MiB/s |
+| `pptx_60s`（PPTX 60 页） | 21,503 B | 0.507 ms | 40.41 MiB/s |
+| `csv_10000r`（CSV 10,000 行） | 580,399 B | 2.094 ms | 264.36 MiB/s |
+| `csv_1M_rows`（CSV 百万行，16 MiB 上限） | 64,037,065 B | 97.313 ms | 627.57 MiB/s |
+| `sqlite_4800r`（SQLite B-tree 多页库） | 499,712 B | 1.782 ms | 267.47 MiB/s |
+| `nested_archive_400f`（嵌套 ZIP + TAR） | 228,346 B | 0.270 ms | 807.08 MiB/s |
+
+可在本地执行 `cargo run --release --example bench` 复现当前硬件数据。
+
+---
+
 ## 协议
 
 本项目采用 [MIT License](../LICENSE) 开源。

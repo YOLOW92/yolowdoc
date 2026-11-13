@@ -8,13 +8,26 @@ thread_local! {
     static ACTIVE: Cell<bool> = const { Cell::new(false) };
     static LIVE: Cell<isize> = const { Cell::new(0) };
     static PEAK: Cell<isize> = const { Cell::new(0) };
+    static ALLOCS: Cell<usize> = const { Cell::new(0) };
+    static TOTAL_BYTES: Cell<usize> = const { Cell::new(0) };
 }
 
 pub struct Probe;
 
-fn note(delta: isize) {
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Stats {
+    pub peak: usize,
+    pub allocs: usize,
+    pub total_bytes: usize,
+}
+
+fn note(delta: isize, count_alloc: usize) {
     ACTIVE.with(|active| {
         if active.get() {
+            if count_alloc > 0 {
+                ALLOCS.with(|c| c.set(c.get() + 1));
+                TOTAL_BYTES.with(|b| b.set(b.get() + count_alloc));
+            }
             LIVE.with(|live| {
                 let v = live.get() + delta;
                 live.set(v);
@@ -33,30 +46,42 @@ unsafe impl GlobalAlloc for Probe {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let p = unsafe { System.alloc(layout) };
         if !p.is_null() {
-            note(layout.size() as isize);
+            note(layout.size() as isize, layout.size());
         }
         p
     }
 
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
-        note(-(layout.size() as isize));
+        note(-(layout.size() as isize), 0);
         unsafe { System.dealloc(p, layout) }
     }
 
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new: usize) -> *mut u8 {
         let q = unsafe { System.realloc(p, layout, new) };
         if !q.is_null() {
-            note(new as isize - layout.size() as isize);
+            note(new as isize - layout.size() as isize, new);
         }
         q
     }
 }
 
-pub fn peak<T>(f: impl FnOnce() -> T) -> (T, usize) {
+pub fn measure<T>(f: impl FnOnce() -> T) -> (T, Stats) {
     ACTIVE.with(|a| a.set(true));
     LIVE.with(|l| l.set(0));
     PEAK.with(|p| p.set(0));
+    ALLOCS.with(|c| c.set(0));
+    TOTAL_BYTES.with(|b| b.set(0));
     let out = f();
     ACTIVE.with(|a| a.set(false));
-    (out, PEAK.with(|p| p.get().max(0) as usize))
+    let stats = Stats {
+        peak: PEAK.with(|p| p.get().max(0) as usize),
+        allocs: ALLOCS.with(Cell::get),
+        total_bytes: TOTAL_BYTES.with(Cell::get),
+    };
+    (out, stats)
+}
+
+pub fn peak<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let (out, s) = measure(f);
+    (out, s.peak)
 }

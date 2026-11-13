@@ -14,6 +14,8 @@ pub(crate) enum Block {
     },
     /// 第一行当表头。单元格是已经转义好的行内文字。
     Table(Vec<Vec<String>>),
+    /// 连续存放的表格，输出与 [`Block::Table`] 完全相同。
+    Grid(Grid),
     /// 原样输出（例如 `<!-- slide 3 -->`、脚注定义）。
     Raw(String),
 }
@@ -54,6 +56,7 @@ pub(crate) fn render(blocks: &[Block]) -> String {
                 out.push_str(&guard_lines(text, indent.len() + marker.len()));
             }
             Block::Table(rows) => table(&mut out, rows),
+            Block::Grid(grid) => grid.render_into(&mut out),
             Block::Raw(s) => out.push_str(s),
         }
     }
@@ -186,7 +189,7 @@ pub(crate) fn escape_into(out: &mut String, s: &str) {
 /// 连续存放的表格：各单元格整理好的文字按行顺序写在同一个缓冲区里，另记每格、每行的结束位置。
 /// 几十万格的 CSV 存成 `Vec<Vec<String>>` 时每格单独分配、散在堆上，读写都跳着走
 /// （cachegrind：末级缓存未命中占 CSV 转换估算周期的约 15%，八成出在分配和拷贝上）。
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct Grid {
     text: String,
     cell_ends: Vec<usize>,
@@ -238,9 +241,36 @@ impl Grid {
             })
     }
 
+    pub(crate) fn join_rows(&self, row_sep: &str) -> String {
+        let mut out = String::new();
+        for r in 0..self.rows() {
+            if r > 0 {
+                out.push_str(row_sep);
+            }
+            for (i, c) in self.row(r).enumerate() {
+                if i > 0 {
+                    out.push(' ');
+                }
+                out.push_str(c);
+            }
+        }
+        out
+    }
+
     /// 渲染成 Markdown 表格（和 `render(&[Block::Table(..)])` 输出相同），第一行当表头。
     pub(crate) fn render(&self) -> String {
+        let mut out = String::with_capacity(self.text.len() + (self.rows() + 1) * 16 + 1);
+        self.render_into(&mut out);
+        out.push('\n');
+        out
+    }
+
+    /// 将表格追加到 `out`（不含末尾换行）。
+    pub(crate) fn render_into(&self, out: &mut String) {
         let rows = self.rows();
+        if rows == 0 {
+            return;
+        }
         let cols = (0..rows)
             .map(|r| {
                 let first = if r == 0 { 0 } else { self.row_ends[r - 1] };
@@ -250,7 +280,7 @@ impl Grid {
             .unwrap_or(0)
             .max(1);
         // 每格多出 `| ` 和空格，表头下面一行分隔线
-        let mut out = String::with_capacity(self.text.len() + (rows + 1) * (cols * 6 + 2) + 1);
+        out.reserve(self.text.len() + (rows + 1) * (cols * 6 + 2));
         for r in 0..rows {
             out.push('|');
             let mut n = 0;
@@ -271,8 +301,6 @@ impl Grid {
                 out.push('\n');
             }
         }
-        out.push('\n');
-        out
     }
 }
 

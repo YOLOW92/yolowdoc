@@ -223,3 +223,18 @@ fn column_parsing() {
     let c = parse_columns("CREATE TABLE t(a INT PRIMARY KEY, b)");
     assert_eq!(c.rowid_alias, None);
 }
+
+#[test]
+fn hostile_record_overflow_and_zero_columns_stop_cleanly() {
+    let mut page = [0u8; 4096];
+    page[..16].copy_from_slice(MAGIC);
+    page[16..18].copy_from_slice(&4096u16.to_be_bytes());
+    let db = Db::open(&page).unwrap();
+    // 超大 varint 头长 + 大量 0 字节列
+    let mut evil = vec![0xFF; 9];
+    evil.resize(256, 0);
+    assert!(db.record(&evil, 128).len() <= 128);
+    let mut many_zero = vec![0x81, 0x40]; // hsize = 192
+    many_zero.resize(200, 0);
+    assert!(db.record(&many_zero, 64).len() <= 64);
+}

@@ -88,7 +88,7 @@ pub fn media(bytes: &[u8], format: Format, opts: &Options<'_>) -> Result<Vec<Med
         let locations = found.locations.remove(&part).unwrap_or_default();
         out.push(Media {
             format: sniff(&data, &part),
-            bytes: zip.entry_size(&part).unwrap_or(data.len() as u64),
+            bytes: data.len() as u64,
             hash: hex(&Sha256::digest(&data)),
             part,
             locations,
@@ -99,6 +99,7 @@ pub fn media(bytes: &[u8], format: Format, opts: &Options<'_>) -> Result<Vec<Med
 
 /// 原样取出一个媒体部件（[`Media::part`]）。没有这个部件时返回 `None`。
 pub fn media_bytes(bytes: &[u8], part: &str, opts: &Options<'_>) -> Result<Option<Vec<u8>>, Error> {
+    check_deadline(opts)?;
     Zip::open(bytes, &opts.limits)?.read(part)
 }
 

@@ -331,7 +331,7 @@ pub(crate) fn decode(input: &[u8], limit: usize) -> Result<Vec<(String, Vec<u8>)
         let pack = input
             .get(start..)
             .ok_or_else(|| bad("truncated header data"))?;
-        header = unpack(pack, f, 256 << 20)?;
+        header = unpack(pack, f, limit)?;
     }
     let mut r = Reader { b: &header, pos: 0 };
     if r.byte()? != K_HEADER {

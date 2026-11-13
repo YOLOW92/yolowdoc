@@ -1,6 +1,6 @@
 [package]
 name = "yolowdoc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89"
 description = "Pure-Rust documents-to-Markdown library: DOCX, XLSX, XLSB, PPTX, legacy DOC/XLS/PPT, ODF, HWP/HWPX, EPUB, MOBI, RTF, WordPerfect, Email, SQLite, DBF, Archives, CSV and code outlines."

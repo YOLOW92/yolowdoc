@@ -81,13 +81,14 @@ pub(crate) fn convert_text(text: &str, opts: &Options<'_>) -> Result<Converted, 
     Ok(out)
 }
 
-fn decode(bytes: &[u8]) -> String {
+fn decode(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     match bytes {
-        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest).into_owned(),
-        [0xFF, 0xFE, ..] | [0xFE, 0xFF, ..] => crate::xml::decode(bytes.to_vec()),
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest),
+        [0xFF, 0xFE, ..] | [0xFE, 0xFF, ..] => crate::decode_utf_bom(bytes),
         _ => match std::str::from_utf8(bytes) {
-            Ok(s) => s.to_string(),
-            Err(_) => bytes.iter().map(|&b| windows_1252(b)).collect(),
+            Ok(s) => Cow::Borrowed(s),
+            Err(_) => Cow::Owned(bytes.iter().map(|&b| windows_1252(b)).collect()),
         },
     }
 }

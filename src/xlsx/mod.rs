@@ -29,11 +29,12 @@ pub(crate) struct Book {
 }
 
 impl Book {
-    /// 一个数值单元格的显示值。单元格自己是“常规”格式、又落在透视表数据区里时，
+    /// 一个数值单元格的显示值，追加到 `out` 末尾。单元格自己是“常规”格式、又落在透视表数据区里时，
     /// 用透视表值字段的格式 `pivot`（格式 id）。
-    fn number(&self, raw: &str, style: usize, pivot: Option<u32>) -> String {
+    fn number_into(&self, raw: &str, style: usize, pivot: Option<u32>, out: &mut String) {
         let Ok(v) = raw.trim().parse::<f64>() else {
-            return raw.to_string();
+            out.push_str(raw);
+            return;
         };
         let own = self.formats.get(style).map_or("General", String::as_str);
         let pivot_code;
@@ -44,6 +45,10 @@ impl Book {
             }
             _ => own,
         };
+        if code.eq_ignore_ascii_case("general") {
+            numfmt::general_into(v, out);
+            return;
+        }
         let cached = self.compiled.borrow().get(code).cloned();
         let compiled = cached.unwrap_or_else(|| {
             let c = std::rc::Rc::new(numfmt::compile(code));
@@ -52,7 +57,7 @@ impl Book {
                 .insert(code.to_string(), c.clone());
             c
         });
-        numfmt::format_compiled(v, &compiled, self.date1904)
+        out.push_str(&numfmt::format_compiled(v, &compiled, self.date1904));
     }
 }
 
@@ -109,8 +114,11 @@ pub(crate) fn convert(zip: &Zip<'_>, opts: &Options<'_>) -> Result<Converted, Er
         };
         let pivots = pivot::areas(zip, &rel.target)?;
         let grid = sheet::read(&sx, &book, &pivots, opts, &mut budget, &mut out.warnings)?;
-        if !grid.is_empty() {
-            blocks.push(Block::Table(grid));
+        if grid.rows() > 0 {
+            blocks.push(Block::Grid(grid));
+        }
+        if crate::budget::exhausted() {
+            break;
         }
     }
     out.parts = sheets.len();
@@ -301,6 +309,49 @@ mod tests {
             got.warnings.iter().any(|w| w.contains("cell limit")),
             "{:?}",
             got.warnings
+        );
+    }
+
+    #[test]
+    fn repeated_large_shared_string_stops_at_output_budget_without_cloning() {
+        let big_str = "X".repeat(32 << 10);
+        let shared = format!("<sst><si><t>{big_str}</t></si></sst>");
+        let mut sheet = String::from("<worksheet><sheetData>");
+        for r in 1..=2000 {
+            sheet.push_str(&format!(
+                r#"<row r="{r}"><c r="A{r}" t="s"><v>0</v></c></row>"#
+            ));
+        }
+        sheet.push_str("</sheetData></worksheet>");
+        let bytes = build(&[
+            ("[Content_Types].xml", b"<Types/>", false),
+            (
+                "xl/workbook.xml",
+                br#"<workbook><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+                false,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+                false,
+            ),
+            ("xl/sharedStrings.xml", shared.as_bytes(), false),
+            ("xl/worksheets/sheet1.xml", sheet.as_bytes(), false),
+        ]);
+        let opts = Options {
+            limits: crate::Limits {
+                max_output_bytes: 256 << 10,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (res, peak) =
+            crate::test_probe::peak(|| crate::convert(&bytes, crate::Format::Xlsx, &opts));
+        let doc = res.unwrap();
+        assert!(doc.markdown.len() <= opts.limits.max_output_bytes);
+        assert!(
+            peak < 4 << 20,
+            "shared string amplification peaked at {peak} bytes"
         );
     }
 }

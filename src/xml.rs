@@ -209,9 +209,8 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    /// 读到当前元素结束为止，拼出里面所有文字（刚读到开始标签之后调用）。
-    pub(crate) fn text_until_end(&mut self) -> Result<String, Error> {
-        let mut out = String::new();
+    /// 读到当前元素结束为止，把里面所有文字追加到 `out`（刚读到开始标签之后调用）。
+    pub(crate) fn text_until_end_into(&mut self, out: &mut String) -> Result<(), Error> {
         let mut depth = 1;
         while let Some(t) = self.next()? {
             match t {
@@ -225,6 +224,13 @@ impl<'a> Reader<'a> {
                 Tok::Text(t) => out.push_str(&t),
             }
         }
+        Ok(())
+    }
+
+    /// 读到当前元素结束为止，拼出里面所有文字（刚读到开始标签之后调用）。
+    pub(crate) fn text_until_end(&mut self) -> Result<String, Error> {
+        let mut out = String::new();
+        self.text_until_end_into(&mut out)?;
         Ok(out)
     }
 }

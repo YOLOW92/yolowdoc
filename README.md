@@ -99,6 +99,24 @@ fn convert_member(bytes: &[u8], name: &str, max_bytes: usize) -> Result<Option<C
 
 ---
 
+## Performance
+
+Measured on Linux x86_64 (`cargo run --release --example bench`, pinned to a single core):
+
+| Workload | Input | p50 Latency | Throughput |
+|---|---|---|---|
+| `docx_2500p` (DOCX 2,500 paras) | 41,454 B | 1.910 ms | 20.70 MiB/s |
+| `xlsx_4000x8` (XLSX 32,000 cells) | 183,400 B | 15.212 ms | 11.50 MiB/s |
+| `pptx_60s` (PPTX 60 slides) | 21,503 B | 0.507 ms | 40.41 MiB/s |
+| `csv_10000r` (CSV 10,000 rows) | 580,399 B | 2.094 ms | 264.36 MiB/s |
+| `csv_1M_rows` (CSV 1M rows, 16 MiB cap) | 64,037,065 B | 97.313 ms | 627.57 MiB/s |
+| `sqlite_4800r` (SQLite B-tree) | 499,712 B | 1.782 ms | 267.47 MiB/s |
+| `nested_archive_400f` (nested ZIP + TAR) | 228,346 B | 0.270 ms | 807.08 MiB/s |
+
+Higher throughput / lower latency is better. Run `cargo run --release --example bench` locally to reproduce on your hardware.
+
+---
+
 ## License
 
 Licensed under the [MIT License](LICENSE).

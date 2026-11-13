@@ -239,21 +239,27 @@ impl<'a> Db<'a> {
     }
 
     /// 解一条记录：头是一串序列类型，后面按类型依次是值。
-    fn record(&self, pl: &[u8]) -> Vec<Value> {
+    fn record(&self, pl: &[u8], max_cols: usize) -> Vec<Value> {
         let mut out = Vec::new();
         let Some((hsize, mut p)) = varint(pl, 0) else {
             return out;
         };
-        let hsize = hsize as usize;
+        let Ok(hsize) = usize::try_from(hsize) else {
+            return out;
+        };
+        let end_head = hsize.min(pl.len());
         let mut body = hsize;
-        while p < hsize {
+        while p < end_head && out.len() < max_cols {
             let Some((t, q)) = varint(pl, p) else { break };
             p = q;
             let (v, len) = match t {
                 0 => (Value::Null, 0),
                 1..=6 => {
                     let n = [1usize, 2, 3, 4, 6, 8][t as usize - 1];
-                    let Some(raw) = pl.get(body..body + n) else {
+                    let Some(end) = body.checked_add(n) else {
+                        break;
+                    };
+                    let Some(raw) = pl.get(body..end) else {
                         break;
                     };
                     let mut x = if raw[0] & 0x80 != 0 { -1i64 } else { 0 };
@@ -263,7 +269,10 @@ impl<'a> Db<'a> {
                     (Value::Int(x), n)
                 }
                 7 => {
-                    let Some(raw) = pl.get(body..body + 8) else {
+                    let Some(end) = body.checked_add(8) else {
+                        break;
+                    };
+                    let Some(raw) = pl.get(body..end) else {
                         break;
                     };
                     (
@@ -438,7 +447,7 @@ pub(crate) fn convert(bytes: &[u8], opts: &Options<'_>) -> Result<Converted, Err
     let db = Db::open(bytes)?;
     let mut tables: Vec<(String, u32, String)> = Vec::new();
     db.walk(1, &mut HashSet::new(), 0, opts, &mut |_, pl| {
-        let row = db.record(&pl);
+        let row = db.record(&pl, 16);
         if let [
             Value::Text(kind),
             Value::Text(name),
@@ -460,13 +469,17 @@ pub(crate) fn convert(bytes: &[u8], opts: &Options<'_>) -> Result<Converted, Err
     let mut warnings = Vec::new();
     let mut cells = 0usize;
     let max_cells = opts.limits.max_cells;
+    let max_cols = opts.limits.max_columns.max(32);
     for (name, root, sql) in &tables {
         check_deadline(opts)?;
         blocks.push(Block::Heading(2, md::escape(name)));
         let cols = parse_columns(sql);
-        let mut rows = Vec::new();
+        let mut grid = md::Grid::default();
         if !cols.names.is_empty() {
-            rows.push(cols.names.iter().map(|n| md::escape(n)).collect::<Vec<_>>());
+            for n in &cols.names {
+                grid.push_cell(&md::escape(n));
+            }
+            grid.end_row();
         }
         let width = cols.names.len();
         // WITHOUT ROWID 的记录是主键在前：算出记录位置到列位置的映射
@@ -476,37 +489,76 @@ pub(crate) fn convert(bytes: &[u8], opts: &Options<'_>) -> Result<Converted, Err
             o
         });
         let mut over = false;
+        let mut unbilled = 0usize;
+        let mut scratch: Vec<String> = Vec::new();
         db.walk(*root, &mut HashSet::new(), 0, opts, &mut |rowid, pl| {
-            let vals = db.record(&pl);
-            if cells + width.max(vals.len()) > max_cells || budget::exhausted() {
-                over = cells + width.max(vals.len()) > max_cells;
+            let vals = db.record(&pl, max_cols);
+            let row_len = width.max(vals.len());
+            if cells + row_len > max_cells || budget::exhausted() {
+                over = cells + row_len > max_cells;
                 return false;
             }
-            let mut row = vec![String::new(); width.max(vals.len())];
-            for (i, v) in vals.iter().enumerate() {
-                let col = order.as_ref().and_then(|o| o.get(i)).copied().unwrap_or(i);
-                let text = match (v, cols.rowid_alias, rowid) {
-                    (Value::Null, Some(a), Some(id)) if a == col => id.to_string(),
-                    _ => v.display(),
-                };
-                budget::spend(text.len());
-                if let Some(slot) = row.get_mut(col) {
-                    *slot = md::escape(&md::squeeze(&text));
+            if let Some(ord) = &order {
+                scratch.clear();
+                scratch.resize(row_len, String::new());
+                for (i, v) in vals.iter().enumerate() {
+                    let col = ord.get(i).copied().unwrap_or(i);
+                    let text = match (v, cols.rowid_alias, rowid) {
+                        (Value::Null, Some(a), Some(id)) if a == col => id.to_string(),
+                        _ => v.display(),
+                    };
+                    unbilled += text.len();
+                    if let Some(slot) = scratch.get_mut(col) {
+                        *slot = md::escape(&md::squeeze(&text));
+                    }
+                }
+                for cell in &scratch {
+                    grid.push_cell(cell);
+                }
+            } else {
+                for i in 0..row_len {
+                    if let Some(v) = vals.get(i) {
+                        match (v, cols.rowid_alias, rowid) {
+                            (Value::Null, Some(a), Some(id)) if a == i => {
+                                let s = id.to_string();
+                                unbilled += s.len();
+                                grid.push_cell(&s);
+                            }
+                            (Value::Text(s), _, _) => {
+                                unbilled += s.len();
+                                grid.push_cell(&md::escape(&md::squeeze(s)));
+                            }
+                            (Value::Null, _, _) => grid.push_cell(""),
+                            _ => {
+                                let s = v.display();
+                                unbilled += s.len();
+                                grid.push_cell(&s);
+                            }
+                        }
+                    } else {
+                        grid.push_cell("");
+                    }
                 }
             }
-            cells += row.len();
-            rows.push(row);
+            grid.end_row();
+            cells += row_len;
+            if unbilled >= budget::BATCH {
+                let ok = budget::spend(unbilled);
+                unbilled = 0;
+                if !ok {
+                    return false;
+                }
+            }
             true
         })?;
+        if unbilled > 0 {
+            budget::spend(unbilled);
+        }
         if over {
             warnings.push(format!("cells_truncated: stopped at {max_cells} cells"));
         }
-        let longest = rows.iter().map(Vec::len).max().unwrap_or(0);
-        for r in &mut rows {
-            r.resize(longest, String::new());
-        }
-        if !rows.is_empty() {
-            blocks.push(Block::Table(rows));
+        if grid.rows() > 0 {
+            blocks.push(Block::Grid(grid));
         }
         if over || budget::exhausted() {
             break;
@@ -525,4 +577,4 @@ pub(crate) fn convert(bytes: &[u8], opts: &Options<'_>) -> Result<Converted, Err
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

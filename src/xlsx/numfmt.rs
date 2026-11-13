@@ -118,11 +118,21 @@ pub(crate) fn format_compiled(v: f64, code: &Compiled, date1904: bool) -> String
 
 /// “常规”格式：整数照写；小数最多 15 位有效数字（去掉末尾的 0）；很大或很小时用科学计数。
 pub(crate) fn general(v: f64) -> String {
+    let mut out = String::new();
+    general_into(v, &mut out);
+    out
+}
+
+/// [`general`]，直接写入 `out` 末尾。
+pub(crate) fn general_into(v: f64, out: &mut String) {
+    use std::fmt::Write as _;
     if v.is_nan() {
-        return "#NUM!".into();
+        out.push_str("#NUM!");
+        return;
     }
     if v == 0.0 {
-        return "0".into();
+        out.push('0');
+        return;
     }
     let a = v.abs();
     if !(1e-9..1e15).contains(&a) {
@@ -130,14 +140,18 @@ pub(crate) fn general(v: f64) -> String {
         let (m, e) = s.split_once('E').unwrap_or((&s, "0"));
         let m = m.trim_end_matches('0').trim_end_matches('.');
         let e: i32 = e.parse().unwrap_or(0);
-        return format!("{m}E{}{:02}", if e < 0 { '-' } else { '+' }, e.abs());
+        let _ = write!(out, "{m}E{}{:02}", if e < 0 { '-' } else { '+' }, e.abs());
+        return;
     }
+    let start = out.len();
     let digits = 15 - (a.log10().floor() as i32 + 1);
-    let s = format!("{:.*}", digits.clamp(0, 20) as usize, v);
-    if s.contains('.') {
-        s.trim_end_matches('0').trim_end_matches('.').to_string()
-    } else {
-        s
+    let _ = write!(out, "{:.*}", digits.clamp(0, 20) as usize, v);
+    if out[start..].contains('.') {
+        let trimmed = out[start..]
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .len();
+        out.truncate(start + trimmed);
     }
 }
 

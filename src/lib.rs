@@ -22,6 +22,10 @@ use std::fmt;
 use std::time::Instant;
 
 #[cfg(test)]
+mod bench_internal;
+#[cfg(test)]
+mod fuzz_tests;
+#[cfg(test)]
 mod test_probe;
 
 #[cfg(test)]
@@ -226,7 +230,7 @@ pub fn convert(bytes: &[u8], format: Format, opts: &Options<'_>) -> Result<Conve
         | Format::Markdown
         | Format::Fenced(_)
         | Format::Subtitle
-        | Format::Notebook => text_format(&String::from_utf8_lossy(bytes), format, opts),
+        | Format::Notebook => text_format(&decode_utf_bom(bytes), format, opts),
         Format::Outline => opml::convert(bytes, opts),
         Format::Fb2 => fb2::convert(bytes, opts),
         Format::Docbook | Format::Jats => xmldoc::convert_article(bytes, opts),
@@ -262,6 +266,33 @@ pub fn convert(bytes: &[u8], format: Format, opts: &Options<'_>) -> Result<Conve
             }
         }
     })
+}
+
+/// 解码带 BOM 的 UTF-8 / UTF-16 文本；普通 UTF-8 零拷贝借用。
+pub(crate) fn decode_utf_bom(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    match bytes {
+        [0xEF, 0xBB, 0xBF, rest @ ..] => String::from_utf8_lossy(rest),
+        [0xFF, 0xFE, rest @ ..] | [0xFE, 0xFF, rest @ ..] => {
+            let le = bytes[0] == 0xFF;
+            let (chunks, rem) = rest.as_chunks::<2>();
+            let units = chunks.iter().map(|c| {
+                if le {
+                    u16::from_le_bytes(*c)
+                } else {
+                    u16::from_be_bytes(*c)
+                }
+            });
+            let mut s: String = char::decode_utf16(units)
+                .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+                .collect();
+            if !rem.is_empty() {
+                s.push(char::REPLACEMENT_CHARACTER);
+            }
+            Cow::Owned(s)
+        }
+        _ => String::from_utf8_lossy(bytes),
+    }
 }
 
 /// 加了口令的 OOXML 不是 ZIP，而是 OLE 复合文件（MS-OFFCRYPTO），开头是这个签名。
@@ -327,5 +358,31 @@ mod tests {
             convert(&ole, Format::Docx, &Options::default()),
             Err(Error::Encrypted)
         );
+    }
+
+    #[test]
+    fn decodes_utf8_and_utf16_bom_text_documents() {
+        let sample = "# 标题\n\nhello 🚀\n";
+        let utf8_bom = [b"\xEF\xBB\xBF", sample.as_bytes()].concat();
+        let mut utf16_le = vec![0xFFu8, 0xFE];
+        for u in sample.encode_utf16() {
+            utf16_le.extend_from_slice(&u.to_le_bytes());
+        }
+        let mut utf16_be = vec![0xFEu8, 0xFF];
+        for u in sample.encode_utf16() {
+            utf16_be.extend_from_slice(&u.to_be_bytes());
+        }
+        let expected = convert_text(sample, Format::Markdown, &Options::default()).unwrap();
+        for (label, raw) in [
+            ("utf8_bom", &utf8_bom),
+            ("utf16_le", &utf16_le),
+            ("utf16_be", &utf16_be),
+        ] {
+            let detected = Format::detect(raw, Some("note.md"), None);
+            assert_eq!(detected, Some(Format::Markdown), "{label}");
+            let got = convert(raw, Format::Markdown, &Options::default()).unwrap();
+            assert_eq!(got.markdown, expected.markdown, "{label}");
+            assert_eq!(got.title, expected.title, "{label}");
+        }
     }
 }

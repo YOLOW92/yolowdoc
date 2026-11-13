@@ -12,7 +12,7 @@ fn u32_at(d: &[u8], i: usize) -> Option<u32> {
     Some(u32::from_le_bytes(d.get(i..i + 4)?.try_into().ok()?))
 }
 
-pub(super) fn decompress(data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn decompress(data: &[u8]) -> Option<Vec<u8>> {
     let raw_size = u32_at(data, 4)? as usize;
     if raw_size > MAX_OUTPUT {
         return None;
@@ -26,7 +26,7 @@ pub(super) fn decompress(data: &[u8]) -> Option<Vec<u8>> {
     let mut dict = [0u8; 4096];
     dict[..PREBUF.len()].copy_from_slice(PREBUF);
     let mut write = PREBUF.len();
-    let mut out = Vec::with_capacity(raw_size);
+    let mut out = Vec::with_capacity(raw_size.min(body.len().saturating_mul(8).max(4096)));
     let mut p = 0usize;
     while out.len() < raw_size {
         let Some(&flags) = body.get(p) else { break };
@@ -96,5 +96,15 @@ mod tests {
         d[8] = 0;
         assert_eq!(decompress(&d), None);
         assert_eq!(decompress(b"short"), None);
+    }
+
+    #[test]
+    fn huge_declared_raw_size_in_short_stream_does_not_preallocate() {
+        let mut d = vec![0u8; 16];
+        d[4..8].copy_from_slice(&(32u32 << 20).to_le_bytes());
+        d[8..12].copy_from_slice(&MAGIC_COMPRESSED.to_le_bytes());
+        let (out, peak) = crate::test_probe::peak(|| decompress(&d));
+        assert!(out.unwrap().is_empty());
+        assert!(peak <= 8192, "peak allocation {peak} bytes");
     }
 }
