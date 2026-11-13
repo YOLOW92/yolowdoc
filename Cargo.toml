@@ -1,0 +1,50 @@
+[package]
+name = "yolowdoc"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Pure-Rust documents-to-Markdown library: DOCX, XLSX, XLSB, PPTX, legacy DOC/XLS/PPT, ODF, HWP/HWPX, EPUB, MOBI, RTF, WordPerfect, Email, SQLite, DBF, Archives, CSV and code outlines."
+license = "MIT"
+repository = "https://github.com/YOLOW92/yolowdoc"
+homepage = "https://github.com/YOLOW92/yolowdoc"
+documentation = "https://docs.rs/yolowdoc"
+readme = "README.md"
+keywords = ["docx", "xlsx", "pptx", "markdown", "document"]
+categories = ["parsing", "text-processing"]
+include = [
+    "src/**",
+    "tests/**",
+    "examples/**",
+    "docs/**",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "Cargo.toml",
+]
+
+[features]
+default = ["syntax", "zstd"]
+# Optional source-code outline extraction via yolowsyntax (symbols, imports, sections).
+syntax = ["dep:yolowsyntax"]
+# Optional Zstandard (.zst / .tar.zst) archive decompression via yolowzstd.
+zstd = ["dep:yolowzstd"]
+
+[dependencies]
+# Optional code outline extraction (functions, classes, imports)
+yolowsyntax = { version = "0.1.2", optional = true }
+# Optional Zstandard decompression for .zst / .tar.zst archives
+yolowzstd = { version = "0.1.2", optional = true }
+# Deflate decompression for ZIP / HWP / tar.gz; ZIP directory, XML and container readers are self-written
+miniz_oxide = "0.9.1"
+# SIMD delimiter / quote / newline scanning for CSV
+memchr = "2.8.3"
+# SHA-256 content hashing for embedded media listing
+sha2 = "0.11.1"
+# Codepage & charset decoding for RTF, DBF, MOBI, Email and legacy Office
+encoding_rs = "0.8.42"
+# Jupyter notebook (.ipynb) parsing
+serde_json = "1.0.154"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
